@@ -1,5 +1,7 @@
 import unittest
 import codecs
+import copy
+import statistics
 
 from graph import Graph
 from graphtypes import GraphVertex, GraphEdge
@@ -30,11 +32,55 @@ class GremlinGraph:
 class GremlinTraverser:
 	graphReference = None
 
-	def __init__( self, objectId ):
-		self.objectId = objectId
+	@staticmethod
+	def setGraphReference( graphReference ):
+		GremlinTraverser.graphReference = graphReference
 
-	def __repr__( self ):
-		graphObjectReference = self.get()
+	@staticmethod
+	def init( objectId, labelDict=None, pathList=None ):
+		# GremlinTraverser object is a tuple - (objectId, labelDict, pathList)
+		labelDict = labelDict or dict()
+		pathList = pathList or list()
+		return (objectId, labelDict, pathList)
+
+	@staticmethod
+	def clone( gremlinTraverser, newObjectId, newLabel=None ):
+		_, labelDict, pathList = gremlinTraverser
+		newLabelDict = copy.deepcopy( labelDict )
+		newPathList = copy.deepcopy( pathList )
+		if newLabel is not None:
+			newLabelDict[ newLabel ] = newObjectId
+		newPathList.append( newObjectId )
+		return (newObjectId, newLabelDict, newPathList)
+
+	@staticmethod
+	def signature( gremlinTraverser ):
+		objectId, labelDict, pathList = gremlinTraverser
+		return (objectId, tuple( sorted( labelDict.items() ) ), tuple( pathList ) )
+
+	@staticmethod
+	def get( gremlinTraverser ):
+		objectId, _, _ = gremlinTraverser
+		return GremlinTraverser.graphReference.getGraphObjectReference( objectId )
+
+	@staticmethod
+	def applyLabel( gremlinTraverser, label ):
+		objectId, labelDict, _ = gremlinTraverser
+		labelDict[ label ] = objectId
+
+	@staticmethod
+	def applyLabels( gremlinTraverser, labels ):
+		for label in labels:
+			GremlinTraverser.applyLabel( gremlinTraverser, label )
+
+	@staticmethod
+	def addPath( gremlinTraverser, vertexId ):
+		_, _, pathList = gremlinTraverser
+		pathList.append( vertexId )
+
+	@staticmethod
+	def toString( gremlinTraverser ):
+		graphObjectReference = GremlinTraverser.get( gremlinTraverser )
 		if graphObjectReference.objectType == 'VERTEX':
 			objectDescription = 'v[{}]'.format( graphObjectReference.id )
 		elif graphObjectReference.objectType == 'EDGE':
@@ -42,13 +88,6 @@ class GremlinTraverser:
 			edgeLabel = graphObjectReference.edgeLabel()
 			objectDescription = 'e[{}][{}-{}->{}]'.format( graphObjectReference.id, fromVertex, toVertex, edgeLabel )
 		return objectDescription
-
-	@staticmethod
-	def setGraphReference( graphReference ):
-		GremlinTraverser.graphReference = graphReference
-
-	def get( self ):
-		return GremlinTraverser.graphReference.getGraphObjectReference( self.objectId )
 
 class VertexNotPresentError( Exception ):
 	pass
@@ -61,21 +100,27 @@ class GremlinTraversal:
 		self.terminalStepApplied = False
 		self.terminalResultList = list()
 
+		self.sideEffects = dict()
+		self.traversalLabels = dict()
+
 		GremlinTraverser.setGraphReference( graphReference )
+
+		# Gremlin function names which are also Python keywords are added using setattr.
+		setattr( self, 'as', self.__as )
 
 	def _toString( self ):
 		if self.terminalStepApplied:
 			return self.terminalResultList
-		return [ repr( traverser ) for traverser in self.traverserList ]
+		return [ GremlinTraverser.toString( traverser ) for traverser in self.traverserList ]
 
 	def V( self, * arguments ):
 		if len( arguments ) == 0:
-			self.traverserList = [ GremlinTraverser( vertexId ) for vertexId in self.graphReference.V() ]
+			self.traverserList = [ GremlinTraverser.init( vertexId, pathList=[ vertexId ] ) for vertexId in self.graphReference.V() ]
 		else:
 			vertexId, * _ = arguments
 			vertexId = int( vertexId )
 			if vertexId in self.graphReference.V():
-				self.traverserList = [ GremlinTraverser( vertexId ) ]
+				self.traverserList = [ GremlinTraverser.init( vertexId, pathList=[ vertexId ] ) ]
 			else:
 				raise VertexNotPresentError( 'Vertex with id={} not present'.format( vertexId ) )
 
@@ -87,67 +132,157 @@ class GremlinTraversal:
 
 	def property( self, propertyName, propertyValue ):
 		for traverser in self.traverserList:
-			traverser.get().setProperty( propertyName, propertyValue )
+			GremlinTraverser.get( traverser ).setProperty( propertyName, propertyValue )
 
 	def hasLabel( self, * labels ):
 		labels = set( labels )
-		self.traverserList = filter( lambda traverser : len( set.intersection( labels, traverser.get().labels ) ) > 0,
+		self.traverserList = filter( lambda traverser : len( set.intersection( labels, GremlinTraverser.get( traverser ).labels ) ) > 0,
 			                         self.traverserList )
 
 	def has( self, * arguments ):
 		if len( arguments ) == 2:
 			propertyName, propertyValue = arguments
-			self.traverserList = filter( lambda traverser : traverser.get().props.get( propertyName ) == propertyValue,
+			self.traverserList = filter( lambda traverser : GremlinTraverser.get( traverser ).props.get( propertyName ) == propertyValue,
 				                         self.traverserList )
 
-	def out( self, edgeLabel ):
+	def out( self, edgeLabel=None ):
 		newTraverserList = list()
 		for traverser in self.traverserList:
-			for outgoingEdgeId in traverser.get().outgoingEdges:
+			for outgoingEdgeId in GremlinTraverser.get( traverser ).outgoingEdges:
 				edgeObjectReference = self.graphReference.getGraphObjectReference( outgoingEdgeId )
-				if edgeObjectReference.label == edgeLabel:
+				if edgeLabel is None or edgeObjectReference.label == edgeLabel:
 					fromVertex, toVertex = edgeObjectReference.fromTo()
-					newTraverserList.append( GremlinTraverser( toVertex ) )
+					newGremlinTraverser = GremlinTraverser.clone( traverser, toVertex )
+					newTraverserList.append( newGremlinTraverser )
+		self.traverserList = newTraverserList
+
+	def both( self, edgeLabel=None ):
+		newTraverserList = list()
+		for traverser in self.traverserList:
+			for outgoingEdgeId in GremlinTraverser.get( traverser ).outgoingEdges:
+				edgeObjectReference = self.graphReference.getGraphObjectReference( outgoingEdgeId )
+				if edgeLabel is None or edgeObjectReference.label == edgeLabel:
+					fromVertex, toVertex = edgeObjectReference.fromTo()
+					newGremlinTraverser = GremlinTraverser.clone( traverser, toVertex )
+					newTraverserList.append( newGremlinTraverser )
+			for incomingEdgeId in GremlinTraverser.get( traverser ).incomingEdges:
+				edgeObjectReference = self.graphReference.getGraphObjectReference( incomingEdgeId )
+				if edgeLabel is None or edgeObjectReference.label == edgeLabel:
+					fromVertex, toVertex = edgeObjectReference.fromTo()
+					newGremlinTraverser = GremlinTraverser.clone( traverser, fromVertex )
+					newTraverserList.append( newGremlinTraverser )
 		self.traverserList = newTraverserList
 
 	def values( self, propertyName ):
 		for traverser in self.traverserList:
-			propertyValue = traverser.get().props.get( propertyName )
+			propertyValue = GremlinTraverser.get( traverser ).props.get( propertyName )
 			if propertyValue is None:
 				continue
 			self.terminalResultList.append( propertyValue )
 		self.terminalStepApplied = True
 
+	def max( self ):
+		assert self.terminalStepApplied
+		self.terminalResultList = [ max( self.terminalResultList ) ]
+
+	def min( self ):
+		assert self.terminalStepApplied
+		self.terminalResultList = [ min( self.terminalResultList ) ]
+
+	def mean( self ):
+		assert self.terminalStepApplied
+		self.terminalResultList = [ statistics.mean( self.terminalResultList ) ]
+
+	def __as( self, * labels ):
+		for traverser in self.traverserList:
+			GremlinTraverser.applyLabels( traverser, labels )
+
+	def select( self, * labels ):
+		for traverser in self.traverserList:
+			objectId, labelDict, _ = traverser
+			
+			objectIdList = list()
+			for label in labels:
+				objectIdList.append( labelDict.get( label ) )
+			if all( objectIdList ):
+				print( [ '{}:{}'.format( label, objectId ) for label, objectId in zip( labels, objectIdList ) ] )
+		self.terminalStepApplied = True
+
+	def times( self, numberOfTimesToRepeat ):
+		remainingLoops = self.sideEffects.get( 'loops' ) or int( numberOfTimesToRepeat )
+		remainingLoops -= 1
+		
+		self.sideEffects[ 'loops' ] = remainingLoops
+		if remainingLoops == 0:
+			del self.sideEffects[ 'loops' ]
+			return None
+		return -1
+
 class GremlinExecutionEngine:
 	def __init__( self ):
 		self.g = sample_graph.TinkerPopModernGraph.get()
+		self.stack = list()
+		self.stackFrameIndex = 0
+
+		self.controlSteps = {
+		'repeat' : self.__repeat,
+		'branch' : self.__branch,
+		}
 
 	def exec( self, gremlinQuery ):
 		traversal = GremlinTraversal( self.g )
+		gremlinTokenList = GremlinParser.parse( gremlinQuery )
 
-		for gremlinToken in GremlinParser.parse( gremlinQuery ):
+		self.__exec( traversal, gremlinTokenList )
+
+	def __exec( self, traversal, gremlinTokenList ):
+		self.stack.append( self.stackFrameIndex )
+		self.stackFrameIndex += 1
+		
+		pc = 0
+
+		while pc < len( gremlinTokenList ):
+			gremlinToken = gremlinTokenList[ pc ]
+
 			if gremlinToken.tokenType == GremlinToken.GREMLIN_FUNCTION:
 				functionName, argumentList = gremlinToken.functionName, gremlinToken.argumentList
-				self.__executeStep( traversal, functionName, argumentList )
-		for traversalState in traversal._toString():
-			print( '==>{}'.format( traversalState ) )
+				pc += self.__executeStep( traversal, functionName, argumentList ) or 1
+			else:
+				pc += 1
+
+		self.stack.pop()
+		
+		if len( self.stack ) == 0:
+			for traversalState in traversal._toString():
+				print( '==>{}'.format( traversalState ) )
+
+	def __repeat( self, traversal, functionName, argumentList ):
+		gremlinTokenList = argumentList
+		self.__exec( traversal, gremlinTokenList )
+
+	def __branch( self, traversal, functionName, argumentList ):
+		pass
 
 	def __executeStep( self, traversal, functionName, argumentList ):
+		if functionName in self.controlSteps:
+			self.controlSteps[ functionName ] ( traversal, functionName, argumentList )
+			return 
+		
 		try:
 			function = getattr( traversal, functionName )
 		except AttributeError:
 			print( 'Gremlin step {} not implemented'.format( functionName ) )
 			return
 		literals = [ argument.literal for argument in argumentList ]
-		function( * literals )
+		return function( * literals )
 
 class GremlinConsole:
 	def __init__( self ):
 		self.commandHandlers = dict()
 		self.terminateConsole = False
 
-		self.commandHandlers[ 'exit' ] = self.handleExit
-		self.commandHandlers[ 'quit' ] = self.handleExit
+		for command in ('exit', 'quit', 'q'):
+			self.commandHandlers[ command ] = self.handleExit
 		self.commandHandlers[ 'load' ] = self.handleLoad
 
 		self.gremlinExecutionEngine = GremlinExecutionEngine()
