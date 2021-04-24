@@ -29,8 +29,15 @@ class GremlinGraph:
 	def V( self ):
 		return self.graph.V()
 
+	def E( self ):
+		return self.graph.E()
+
+class DataTraverserExpected( Exception ):
+	pass
+
 class GremlinTraverser:
 	graphReference = None
+	COMPUTATION_OBJECT_ID, COMPUTATION_TAG = -1, 'compute'
 
 	@staticmethod
 	def setGraphReference( graphReference ):
@@ -42,6 +49,25 @@ class GremlinTraverser:
 		labelDict = labelDict or dict()
 		pathList = pathList or list()
 		return (objectId, labelDict, pathList)
+
+	@staticmethod
+	def initDataTraverser( data ):
+		return GremlinTraverser.init( GremlinTraverser.COMPUTATION_OBJECT_ID,
+			                          labelDict={ GremlinTraverser.COMPUTATION_TAG : data } )
+
+	@staticmethod
+	def isDataTraverser( gremlinTraverser ):
+		objectId, labelDict, _ = gremlinTraverser
+		if objectId == GremlinTraverser.COMPUTATION_OBJECT_ID:
+			return True, labelDict[ GremlinTraverser.COMPUTATION_TAG ]
+		return False, None
+
+	@staticmethod
+	def getDataFromTraverser( gremlinTraverser ):
+		isDataTraverser, data = GremlinTraverser.isDataTraverser( gremlinTraverser )
+		if not isDataTraverser:
+			raise DataTraverserExpected()
+		return data
 
 	@staticmethod
 	def clone( gremlinTraverser, newObjectId, newLabel=None ):
@@ -79,17 +105,36 @@ class GremlinTraverser:
 		pathList.append( vertexId )
 
 	@staticmethod
-	def toString( gremlinTraverser ):
+	def toString( objectId ):
+		graphObjectReference = GremlinTraverser.graphReference.getGraphObjectReference( objectId )
+		return GremlinTraverser.__repr__( graphObjectReference )
+
+	@staticmethod
+	def repr( gremlinTraverser ):
+		isDataTraverser, data = GremlinTraverser.isDataTraverser( gremlinTraverser )
+		if isDataTraverser:
+			return str( data )
+		
 		graphObjectReference = GremlinTraverser.get( gremlinTraverser )
+		return GremlinTraverser.__repr__( graphObjectReference )
+
+	@staticmethod
+	def __repr__( graphObjectReference ):
 		if graphObjectReference.objectType == 'VERTEX':
 			objectDescription = 'v[{}]'.format( graphObjectReference.id )
 		elif graphObjectReference.objectType == 'EDGE':
 			fromVertex, toVertex = graphObjectReference.fromTo()
-			edgeLabel = graphObjectReference.edgeLabel()
-			objectDescription = 'e[{}][{}-{}->{}]'.format( graphObjectReference.id, fromVertex, toVertex, edgeLabel )
+			edgeLabel = graphObjectReference.edgeLabel
+			objectDescription = 'e[{}][{}-{}->{}]'.format( graphObjectReference.id, fromVertex, edgeLabel, toVertex )
 		return objectDescription
 
 class VertexNotPresentError( Exception ):
+	pass
+
+class EdgeNotPresentError( Exception ):
+	pass
+
+class GremlinPredicates:
 	pass
 
 class GremlinTraversal:
@@ -97,21 +142,19 @@ class GremlinTraversal:
 		self.graphReference = graphReference
 		self.traverserList = list()
 
-		self.terminalStepApplied = False
-		self.terminalResultList = list()
-
 		self.sideEffects = dict()
-		self.traversalLabels = dict()
 
 		GremlinTraverser.setGraphReference( graphReference )
 
 		# Gremlin function names which are also Python keywords are added using setattr.
 		setattr( self, 'as', self.__as )
 
+	def materialize( self ):
+		if isinstance( self.traverserList, filter ):
+			self.traverserList = list( self.traverserList )
+
 	def _toString( self ):
-		if self.terminalStepApplied:
-			return self.terminalResultList
-		return [ GremlinTraverser.toString( traverser ) for traverser in self.traverserList ]
+		return [ GremlinTraverser.repr( traverser ) for traverser in self.traverserList ]
 
 	def V( self, * arguments ):
 		if len( arguments ) == 0:
@@ -123,6 +166,17 @@ class GremlinTraversal:
 				self.traverserList = [ GremlinTraverser.init( vertexId, pathList=[ vertexId ] ) ]
 			else:
 				raise VertexNotPresentError( 'Vertex with id={} not present'.format( vertexId ) )
+
+	def E( self, * arguments ):
+		if len( arguments ) == 0:
+			self.traverserList = [ GremlinTraverser.init( edgeId , pathList=[ edgeId ] ) for edgeId in self.graphReference.E() ]
+		else:
+			edgeId, * _ = arguments
+			edgeId = int( edgeId )
+			if edgeId in self.graphReference.E():
+				self.traverserList = [ GremlinTraverser.init( edgeId, pathList=[ edgeId ] ) ]
+			else:
+				raise EdgeNotPresentError( 'Edge with id={} not present'.format( edgeId ) )
 
 	def addV( self, * labels ):
 		id_ = self.graphReference.addVertex( labels=labels )
@@ -140,10 +194,26 @@ class GremlinTraversal:
 			                         self.traverserList )
 
 	def has( self, * arguments ):
+		def matchProperty( traverser, propertyName, propertyValue ):
+			return GremlinTraverser.get( traverser ).props.get( propertyName ) == propertyValue
+
 		if len( arguments ) == 2:
 			propertyName, propertyValue = arguments
-			self.traverserList = filter( lambda traverser : GremlinTraverser.get( traverser ).props.get( propertyName ) == propertyValue,
+			self.traverserList = filter( lambda traverser : matchProperty( traverser, propertyName, propertyValue ),
 				                         self.traverserList )
+		elif len( arguments ) == 1:
+			propertyName, * _ = arguments
+			self.traverserList = filter( lambda traverser : GremlinTraverser.get( traverser ).props.get( propertyName ) is not None,
+				                         self.traverserList )
+		elif len( arguments ) == 3:
+			label, propertyName, propertyValue = arguments
+			self.traverserList = filter( lambda traverser : label in GremlinTraverser.get( traverser ).labels and
+				                         matchProperty( traverser, propertyName, propertyValue ),
+				                         self.traverserList )
+
+	def count( self ):
+		self.materialize()
+		self.traverserList = [ GremlinTraverser.initDataTraverser( len( self.traverserList ) ) ]
 
 	def out( self, edgeLabel=None ):
 		newTraverserList = list()
@@ -155,6 +225,29 @@ class GremlinTraversal:
 					newGremlinTraverser = GremlinTraverser.clone( traverser, toVertex )
 					newTraverserList.append( newGremlinTraverser )
 		self.traverserList = newTraverserList
+
+	def outE( self, edgeLabel=None ):
+		pass
+
+	def dedup( self ):
+		dataList = [ GremlinTraverser.getDataFromTraverser( traverser ) for traverser in self.traverserList ]
+		dedupDataList = list( set( dataList ) )
+		self.traverserList = [ GremlinTraverser.initDataTraverser( data ) for data in dedupDataList ]
+
+	def fold( self ):
+		dataList = list()
+		foldedObject = GremlinTraverser.initDataTraverser( dataList )
+		for traverser in self.traverserList:
+			dataList.append( GremlinTraverser.getDataFromTraverser( traverser ) )
+		self.traverserList = [ foldedObject ]
+
+	def path( self ):
+		def traverserMapper( traverser ):
+			_, _, pathList = traverser
+			pathString = ','.join( [ GremlinTraverser.toString( objectId ) for objectId in pathList ] )
+			pathDescription = '[' + pathString + ']'
+			return GremlinTraverser.initDataTraverser( pathDescription )
+		self.traverserList = map( traverserMapper, self.traverserList )
 
 	def both( self, edgeLabel=None ):
 		newTraverserList = list()
@@ -173,25 +266,41 @@ class GremlinTraversal:
 					newTraverserList.append( newGremlinTraverser )
 		self.traverserList = newTraverserList
 
-	def values( self, propertyName ):
-		for traverser in self.traverserList:
-			propertyValue = GremlinTraverser.get( traverser ).props.get( propertyName )
-			if propertyValue is None:
-				continue
-			self.terminalResultList.append( propertyValue )
-		self.terminalStepApplied = True
+	def values( self, * propertyNames ):
+		def traverserMapper( traverser ):
+			props = GremlinTraverser.get( traverser ).props
+			if len( propertyNames ) == 0:
+				return props.values()
+			else:
+				return [ props[ propertyName ] for propertyName in propertyNames if props.get( propertyName ) is not None ]
+		
+		self.traverserList = [  GremlinTraverser.initDataTraverser( propertyValue )
+		                        for traverser in self.traverserList
+		                        for propertyValue in traverserMapper( traverser ) ]
 
 	def max( self ):
-		assert self.terminalStepApplied
-		self.terminalResultList = [ max( self.terminalResultList ) ]
+		self.traverserList = [
+		GremlinTraverser.initDataTraverser( max( map( lambda traverser : GremlinTraverser.getDataFromTraverser( traverser ),
+			                                          self.traverserList ) ) )
+		]
 
 	def min( self ):
-		assert self.terminalStepApplied
-		self.terminalResultList = [ min( self.terminalResultList ) ]
+		self.traverserList = [
+		GremlinTraverser.initDataTraverser( min( map( lambda traverser : GremlinTraverser.getDataFromTraverser( traverser ),
+			                                          self.traverserList ) ) )
+		]
 
 	def mean( self ):
-		assert self.terminalStepApplied
-		self.terminalResultList = [ statistics.mean( self.terminalResultList ) ]
+		self.traverserList = [
+		GremlinTraverser.initDataTraverser( statistics.mean( map( lambda traverser : GremlinTraverser.getDataFromTraverser( traverser ),
+			                                                      self.traverserList ) ) )
+		]
+
+	def sum( self ):
+		self.traverserList = [
+		GremlinTraverser.initDataTraverser( sum( map( lambda traverser : GremlinTraverser.getDataFromTraverser( traverser ),
+			                                          self.traverserList ) ) )
+		]
 
 	def __as( self, * labels ):
 		for traverser in self.traverserList:
@@ -218,6 +327,9 @@ class GremlinTraversal:
 			return None
 		return -1
 
+	def next( self ):
+		self.materialize()
+
 class GremlinExecutionEngine:
 	def __init__( self ):
 		self.g = sample_graph.TinkerPopModernGraph.get()
@@ -228,6 +340,11 @@ class GremlinExecutionEngine:
 		'repeat' : self.__repeat,
 		'branch' : self.__branch,
 		}
+
+		self.variables = dict()
+
+	def setGraph( self, graph ):
+		self.g = graph
 
 	def exec( self, gremlinQuery ):
 		traversal = GremlinTraversal( self.g )
@@ -293,7 +410,7 @@ class GremlinConsole:
 
 	def handleLoad( self ):
 		print( 'Loading air-routes graph...' )
-		loadAirRoutesGraph()
+		self.gremlinExecutionEngine.setGraph( sample_graph.AirRoutesGraph.get() )
 		print( 'Finished loading air-routes graph...' )
 
 	def console( self ):
@@ -307,53 +424,6 @@ class GremlinConsole:
 				self.commandHandlers[ commandStringLowercase ]()
 				continue
 			self.gremlinExecutionEngine.exec( commandString )
-
-def loadAirRoutesGraph():
-	nodesFilePath = 'tests/gremlin/air-routes/air-routes-latest-nodes.csv'
-	edgesFilePath = 'tests/gremlin/air-routes/air-routes-latest-edges.csv'
-
-	graph = GremlinGraph()
-
-	with codecs.open( nodesFilePath, encoding='utf-8' ) as nodesFile:
-		headerList = nodesFile.readline().strip().split( ',' )
-		_, _, * propsList = headerList
-
-		# Ignore the line after the header.
-		nodesFile.readline()
-		
-		idMap = dict()
-		while True:
-			csvLine = nodesFile.readline().strip()
-
-			if len( csvLine ) == 0:
-				break
-			
-			id_, label, * csvElementList = csvLine.split( ',' )
-			props = dict()
-			for propertyKey, propertyValue in zip( propsList, csvElementList ):
-				if propertyValue == str():
-					continue
-				props[ propertyKey ] = propertyValue
-			uid = graph.addVertex( labels=[ label ], props=props )
-			idMap[ id_ ] = uid
-
-	with codecs.open( edgesFilePath, encoding='utf-8' ) as edgesFile:
-		headerList = edgesFile.readline().strip().split( ',' )
-
-		propertyName = headerList[ -1 ]
-
-		while True:
-			csvLine = edgesFile.readline().strip()
-
-			if len( csvLine ) == 0:
-				break
-
-			_, fromId, toId, label, propertyValue = csvLine.split( ',' )
-
-			fromId, toId = idMap[ fromId ], idMap[ toId ]
-			graph.addEdge( fromId, toId, label, { propertyName : propertyValue } )
-
-	return graph
 
 class GremlinTest( unittest.TestCase ):
 	def test_Gremlin( self ):

@@ -1,4 +1,44 @@
 from gremlin import GremlinGraph
+import os
+import xml.etree.ElementTree as ET
+
+class AirRoutesGraph:
+	@staticmethod
+	def get():
+		g = GremlinGraph()
+
+		path = os.path.join( 'tests', 'gremlin', 'air-routes', 'air-routes-latest.graphml' )
+		root = ET.parse( path ).getroot()
+
+		i = len( root.tag )
+		while root.tag[ i - 1 ] != '}':
+			i = i - 1
+
+		namespaceString = root.tag[ : i ]
+		graphNodeTag = namespaceString + 'graph'
+		vertexNodeTag = namespaceString + 'node'
+		edgeNodeTag = namespaceString + 'edge'
+
+		graphNode = root.find( graphNodeTag )
+		for graphObject in graphNode:
+			if graphObject.tag == vertexNodeTag:
+				id_ = graphObject.attrib[ 'id' ]
+				props = dict()
+				for propertyNode in graphObject:
+					propertyKey = propertyNode.attrib[ 'key' ]
+					propertyValue = propertyNode.text
+					props[ propertyKey ] = propertyValue
+				g.addVertex( labels=[ props[ 'labelV' ] ], props=props, id_=int( id_ ) )
+			elif graphObject.tag == edgeNodeTag:
+				id_ = graphObject.attrib[ 'id' ]
+				fromVertex, toVertex = graphObject.attrib[ 'source' ], graphObject.attrib[ 'target' ]
+				for propertyNode in graphObject:
+					propertyKey = propertyNode.attrib[ 'key' ]
+					propertyValue = propertyNode.text
+					props[ propertyKey ] = propertyValue
+				g.addEdge( int( fromVertex ), int( toVertex ), props[ 'labelE' ], props=props, id_=int( id_ ) )
+
+		return g
 
 class TinkerPopModernGraph:
 	@staticmethod
